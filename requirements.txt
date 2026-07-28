@@ -1,0 +1,8 @@
+anthropic
+mcp==1.29.0
+gitpython
+click
+python-dotenv
+chromadb
+sentence-transformers
+pytest
