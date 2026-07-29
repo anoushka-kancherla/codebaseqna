@@ -17,7 +17,8 @@ EXCLUDED_EXTS = {".pyc", ".pyo", ".class", ".o"}
 MAX_DEPTH = 6
 MAX_FILE_BYTES = 500_000
 
-ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+_positional_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+ROOT = Path(_positional_args[0] if _positional_args else ".").resolve()
 NAV_LOG = NavigationLog()
 
 
@@ -106,5 +107,35 @@ async def main():
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
+def build_http_app():
+    # The Anthropic API's MCP connector reaches this server over the network,
+    # so for real use this must sit behind a public HTTPS URL (e.g. ngrok) —
+    # `localhost` is only good for local smoke-testing with curl.
+    import contextlib
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
+
+    async def handle_mcp(scope, receive, send):
+        await session_manager.handle_request(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with session_manager.run():
+            yield
+
+    return Starlette(routes=[Mount("/mcp", app=handle_mcp)], lifespan=lifespan)
+
+
+def run_http(port: int = 8000):
+    import uvicorn
+    uvicorn.run(build_http_app(), host="0.0.0.0", port=port)
+
+
 if __name__ == "__main__":
-    anyio.run(main)
+    if "--http" in sys.argv:
+        run_http()
+    else:
+        anyio.run(main)
