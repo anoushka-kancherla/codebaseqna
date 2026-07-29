@@ -5,11 +5,13 @@ from pathlib import Path
 from urllib.parse import unquote
 
 import anyio
+import git
 from mcp.server import Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
-from mcp.types import Resource, ResourceTemplate
+from mcp.types import Resource, ResourceTemplate, Tool
 
+from server import git_tools
 from server.navigation_log import NavigationLog
 
 EXCLUDED_DIRS = {".git", "node_modules", "__pycache__", "build", "dist", ".venv"}
@@ -74,7 +76,92 @@ def get_file_json(rel: str) -> str:
     return json.dumps({"path": rel, "content": content})
 
 
+def _get_repo() -> git.Repo | None:
+    try:
+        return git.Repo(ROOT)
+    except git.InvalidGitRepositoryError:
+        return None
+
+
+TOOLS = [
+    Tool(
+        name="git_log",
+        description="List recent commits.",
+        inputSchema={"type": "object", "properties": {"n": {"type": "integer", "default": 20}}},
+    ),
+    Tool(
+        name="git_diff",
+        description="Show the diff introduced by a commit.",
+        inputSchema={
+            "type": "object",
+            "properties": {"commit_hash": {"type": "string"}},
+            "required": ["commit_hash"],
+        },
+    ),
+    Tool(
+        name="git_blame",
+        description="Blame a line range of a file.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+                "start_line": {"type": "integer"},
+                "end_line": {"type": "integer"},
+            },
+            "required": ["file_path", "start_line", "end_line"],
+        },
+    ),
+    Tool(
+        name="search_symbol",
+        description="Search the repo for a literal symbol/string.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "file_extensions": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["symbol"],
+        },
+    ),
+]
+
+
+def call_git_tool(tool_name: str, args: dict) -> dict:
+    # Tool results must come back as a dict — the MCP server treats a bare
+    # list/str return as raw ContentBlocks (and iterates a str char-by-char),
+    # so every branch here wraps its result as {"result": ...}.
+    NAV_LOG.record_tool_call(tool_name, args)
+    if tool_name == "git_log":
+        repo = _get_repo()
+        if not repo:
+            return {"error": "NOT_A_GIT_REPO"}
+        return {"result": git_tools.git_log(repo, args.get("n", 20))}
+    if tool_name == "git_diff":
+        repo = _get_repo()
+        if not repo:
+            return {"error": "NOT_A_GIT_REPO"}
+        return {"result": git_tools.git_diff(repo, args["commit_hash"])}
+    if tool_name == "git_blame":
+        repo = _get_repo()
+        if not repo:
+            return {"error": "NOT_A_GIT_REPO"}
+        return {"result": git_tools.git_blame(repo, args["file_path"], args["start_line"], args["end_line"])}
+    if tool_name == "search_symbol":
+        return {"result": git_tools.search_symbol(ROOT, args["symbol"], args.get("file_extensions"))}
+    return {"error": "UNKNOWN_TOOL", "tool_name": tool_name}
+
+
 server = Server("codebase-qa")
+
+
+@server.list_tools()
+async def list_tools() -> list[Tool]:
+    return TOOLS
+
+
+@server.call_tool()
+async def call_tool(tool_name: str, args: dict):
+    return call_git_tool(tool_name, args)
 
 
 @server.list_resources()
