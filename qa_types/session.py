@@ -58,6 +58,8 @@ def build_session_log(
     nav_log: NavigationLog,
     total_files_in_repo: int,
     response: ParsedResponse,
+    attribution: dict | None = None,
+    confidence: dict | None = None,
 ) -> SessionLog:
     reads = nav_log.to_dict()
     files_read = sum(1 for e in reads if e["event"] == "file_read")
@@ -81,5 +83,7 @@ def build_session_log(
             "prose": response.prose,
             "not_found": response.json_header.get("result") if response.json_header.get("result") == "not_found" else None,
         },
+        attribution=attribution,
+        confidence=confidence,
         api_usage=response.usage,
     )
