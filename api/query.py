@@ -5,9 +5,9 @@ from anthropic import Anthropic
 
 from api.stream_parser import ParsedResponse, parse_stream
 
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-5"
 MAX_TOKENS = 8000
-THINKING_BUDGET = 5000
+THINKING_EFFORT = "medium"
 MCP_BETA_FLAG = "mcp-client-2025-04-04"
 
 # The Anthropic MCP connector calls this URL from Anthropic's servers, so it
@@ -17,11 +17,12 @@ MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000/mcp/")
 
 SYSTEM_PROMPT_TEMPLATE = """
 You are a senior engineer on the codebase at {repo_path}.
-You have access to the repository via MCP resources and tools.
+You have access to the repository via MCP tools: list_tree, read_file, git_log,
+git_diff, git_blame, search_symbol.
 
 ## Required behaviour
-1. ALWAYS read repo://tree first before opening any files.
-2. Before reading each file, state in one sentence why you are reading it.
+1. ALWAYS call list_tree first before reading any files.
+2. Before calling read_file on each file, state in one sentence why you are reading it.
 3. After reading each file, state in one sentence what you concluded.
 4. Read at most {max_files} files per response.
 5. Every factual claim MUST cite an exact file path and line range.
@@ -60,19 +61,23 @@ def run_query(
     thinking_enabled: bool = True,
     client: Anthropic | None = None,
     mcp_server_url: str | None = None,
+    context_prefix: str | None = None,
 ) -> ParsedResponse:
     client = client or Anthropic()
+    content = f"{context_prefix}\n\n{question}" if context_prefix else question
     params = dict(
         model=model,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT_TEMPLATE.format(repo_path=repo_path, max_files=max_files),
-        messages=[{"role": "user", "content": question}],
-        stream=True,
+        messages=[{"role": "user", "content": content}],
         mcp_servers=[{"type": "url", "url": mcp_server_url or MCP_SERVER_URL, "name": "codebase"}],
         betas=[MCP_BETA_FLAG],
     )
     if thinking_enabled:
-        params["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
+        # claude-sonnet-5 rejects the older thinking.type=enabled/budget_tokens shape
+        # ("not supported for this model") and wants adaptive thinking + output_config.effort.
+        params["thinking"] = {"type": "adaptive"}
+        params["output_config"] = {"effort": THINKING_EFFORT}
 
     with client.beta.messages.stream(**params) as stream:
         return parse_stream(stream)

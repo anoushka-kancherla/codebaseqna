@@ -7,7 +7,7 @@ from anthropic import Anthropic
 from qa_types.session import LOGS_DIR
 from xai.attribution import check_citations
 
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-5"
 FAITHFULNESS_WARNING_THRESHOLD = 0.7
 
 VERIFY_PROMPT_TEMPLATE = """You are verifying claims made about a codebase against the actual file contents.

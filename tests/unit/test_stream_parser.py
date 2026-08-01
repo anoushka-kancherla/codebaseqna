@@ -33,6 +33,35 @@ def test_split_json_header_missing_returns_empty():
     assert prose == "Just prose, no header."
 
 
+def test_split_json_header_fenced_at_end_falls_back():
+    # Observed in a real run: despite the system prompt, the model narrated
+    # its tool use in prose first and put the JSON header at the end instead
+    # of the start. The anchored patterns miss this; the fallback shouldn't.
+    prose_text = "I'll investigate the codebase first.\n\nHere's what I found."
+    text = prose_text + "\n\n```json\n" + __import__("json").dumps(HEADER) + "\n```"
+    header, prose = split_json_header(text)
+    assert header == HEADER
+    assert prose == prose_text
+
+
+def test_split_json_header_raw_mid_prose_falls_back():
+    # Observed in another real run: no fences at all, the raw {...} object
+    # dropped directly into the middle of running prose.
+    before = "Some narration before the header."
+    after = "## More prose after the header."
+    text = before + __import__("json").dumps(HEADER) + after
+    header, prose = split_json_header(text)
+    assert header == HEADER
+    assert prose == (before + after)
+
+
+def test_split_json_header_ignores_unrelated_braces_in_prose():
+    text = 'Some prose with an unrelated {"foo": "bar"} dict, no real header here.'
+    header, prose = split_json_header(text)
+    assert header == {}
+    assert prose == text
+
+
 def _event(type_, **kwargs):
     return SimpleNamespace(type=type_, **kwargs)
 
@@ -51,3 +80,35 @@ def test_parse_stream_separates_thinking_and_text():
     assert result.prose == "The answer is here."
     assert result.usage == {"output_tokens": 42, "input_tokens": 10}
     assert result.tool_results == []
+
+
+def test_parse_stream_skips_signature_delta_in_thinking_block():
+    # Adaptive thinking mode interleaves a signature_delta (no .thinking attr)
+    # into the thinking content block, used for multi-turn continuity only.
+    events = [
+        _event("content_block_start", content_block=SimpleNamespace(type="thinking")),
+        _event("content_block_delta", delta=SimpleNamespace(thinking="pondering...")),
+        _event("content_block_delta", delta=SimpleNamespace(signature="sig-xyz")),
+        _event("content_block_start", content_block=SimpleNamespace(type="text")),
+        _event("content_block_delta", delta=SimpleNamespace(text="The answer is here.")),
+    ]
+    result = parse_stream(events)
+    assert result.thinking == "pondering..."
+    assert result.prose == "The answer is here."
+
+
+def test_parse_stream_flattens_pydantic_usage():
+    import json as json_mod
+
+    class _FakeUsage:
+        def model_dump(self):
+            return {"output_tokens": 12, "output_tokens_details": {"nested": 1}}
+
+    events = [
+        _event("content_block_start", content_block=SimpleNamespace(type="text")),
+        _event("content_block_delta", delta=SimpleNamespace(text="hi")),
+        _event("message_delta", usage=_FakeUsage()),
+    ]
+    result = parse_stream(events)
+    json_mod.dumps(result.usage)  # must not raise
+    assert result.usage == {"output_tokens": 12, "output_tokens_details": {"nested": 1}}
