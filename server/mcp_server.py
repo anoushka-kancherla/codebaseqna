@@ -123,10 +123,20 @@ TOOLS = [
             "required": ["symbol"],
         },
     ),
+    Tool(
+        name="list_tree",
+        description="List the repo's file tree. Call this first, before reading any files.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="read_file",
+        description="Read a file's contents by path, relative to the repo root.",
+        inputSchema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    ),
 ]
 
 
-def call_git_tool(tool_name: str, args: dict) -> dict:
+def call_registered_tool(tool_name: str, args: dict) -> dict:
     # Tool results must come back as a dict — the MCP server treats a bare
     # list/str return as raw ContentBlocks (and iterates a str char-by-char),
     # so every branch here wraps its result as {"result": ...}.
@@ -148,6 +158,13 @@ def call_git_tool(tool_name: str, args: dict) -> dict:
         return {"result": git_tools.git_blame(repo, args["file_path"], args["start_line"], args["end_line"])}
     if tool_name == "search_symbol":
         return {"result": git_tools.search_symbol(ROOT, args["symbol"], args.get("file_extensions"))}
+    if tool_name == "list_tree":
+        # get_tree_json/get_file_json already instrument NAV_LOG and return
+        # JSON strings for the resource handler below; reuse them here too
+        # rather than duplicating the path-safety and truncation logic.
+        return {"result": json.loads(get_tree_json())}
+    if tool_name == "read_file":
+        return {"result": json.loads(get_file_json(args["path"]))}
     return {"error": "UNKNOWN_TOOL", "tool_name": tool_name}
 
 
@@ -161,7 +178,7 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(tool_name: str, args: dict):
-    return call_git_tool(tool_name, args)
+    return call_registered_tool(tool_name, args)
 
 
 @server.list_resources()

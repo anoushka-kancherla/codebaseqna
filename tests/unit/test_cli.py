@@ -12,7 +12,7 @@ def test_cli_end_to_end_with_mocked_claude(tmp_path, monkeypatch):
     (tmp_path / "README.md").write_text("hello\nworld\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
         # Simulate what Claude would do via the MCP connector: read the tree,
         # then read a file, then answer citing it.
         mcp_server.get_tree_json()
@@ -48,7 +48,7 @@ def test_cli_not_found_shows_search_report_instead_of_prose(tmp_path, monkeypatc
     (tmp_path / "README.md").write_text("hello\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
         return ParsedResponse(
             thinking="",
             json_header={
@@ -78,7 +78,7 @@ def test_cli_flags_invalid_citation(tmp_path, monkeypatch):
     (tmp_path / "README.md").write_text("hello\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
         return ParsedResponse(
             thinking="",
             json_header={"confidence": "low", "files_read": ["README.md"]},
@@ -112,3 +112,56 @@ def test_cli_verify_no_warning_above_threshold(monkeypatch):
     result = runner.invoke(cli.main, ["--verify", "abc123"])
     assert result.exit_code == 0, result.output
     assert "WARNING" not in result.output
+
+
+def test_cli_stability_dispatch(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    fake_result = {
+        "runs": 2, "per_run_files": [["a.py"], ["a.py"]],
+        "pairwise_jaccard": [{"run_a": 0, "run_b": 1, "jaccard": 1.0}],
+        "mean_jaccard": 1.0, "rating": "high",
+        "consistent_files": ["a.py"], "inconsistent_files": [],
+    }
+    monkeypatch.setattr("xai.stability.run_stability_check", lambda *a, **k: fake_result)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        ["--repo", str(tmp_path), "--question", "q?", "--stability", "--runs", "2", "--yes", "--port", "8004"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Stability check (2 runs)" in result.output
+    assert "HIGH" in result.output
+
+
+def test_cli_stability_aborts_without_confirmation(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    monkeypatch.setattr("xai.stability.run_stability_check", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run")))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        ["--repo", str(tmp_path), "--question", "q?", "--stability", "--port", "8005"],
+        input="n\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "Aborted" in result.output
+
+
+def test_cli_index_flag_prepends_context(tmp_path, monkeypatch):
+    (tmp_path / "auth.py").write_text("def login():\n    pass\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    captured = {}
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        captured["context_prefix"] = context_prefix
+        return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "where is login?", "--index", "--port", "8006"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["context_prefix"] is not None
+    assert "login" in captured["context_prefix"]

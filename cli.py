@@ -8,6 +8,9 @@ from pathlib import Path
 
 import click
 import uvicorn
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from api.query import DEFAULT_MODEL, run_query
 from server import mcp_server
@@ -17,6 +20,7 @@ from xai.attribution import check_citations
 from xai.confidence import apply_confidence_overrides
 
 CITATION_RE = re.compile(r"`[^`]+\.\w+:\d+(?:-\d+)?`")
+CHROMA_INDEX_PATH = "./.chroma"
 
 
 def _start_local_mcp_server(repo_path: Path, port: int) -> uvicorn.Server:
@@ -33,6 +37,16 @@ def _start_local_mcp_server(repo_path: Path, port: int) -> uvicorn.Server:
 
 def _highlight_citations(prose: str) -> str:
     return CITATION_RE.sub(lambda m: click.style(m.group(0), fg="cyan", bold=True), prose)
+
+
+def _build_index_context(repo_path: Path, question: str) -> str | None:
+    from retrieval.chroma_index import build_index, query_index
+
+    build_index(str(repo_path), index_path=CHROMA_INDEX_PATH)
+    chunks = query_index(question, index_path=CHROMA_INDEX_PATH)
+    if not chunks:
+        return None
+    return "\n\n".join(f"# {c['file']}:{c['start']}\n{c['content']}" for c in chunks)
 
 
 def _print_answer_panels(response, attribution: dict, confidence: dict, total_files: int, coverage_pct: float):
@@ -63,6 +77,16 @@ def _print_answer_panels(response, attribution: dict, confidence: dict, total_fi
         click.echo(f"  — {path}: {reason}")
 
 
+def _print_stability_report(result: dict):
+    click.echo(f"\nStability check ({result['runs']} runs)")
+    click.echo(f"Mean Jaccard: {result['mean_jaccard']}  Rating: {result['rating'].upper()}")
+    click.echo("\nPairwise scores:")
+    for p in result["pairwise_jaccard"]:
+        click.echo(f"  run {p['run_a']} vs run {p['run_b']}: {p['jaccard']}")
+    click.echo(f"\nConsistent files ({len(result['consistent_files'])}): {result['consistent_files']}")
+    click.echo(f"Inconsistent files ({len(result['inconsistent_files'])}): {result['inconsistent_files']}")
+
+
 @click.command()
 @click.option("--repo", type=click.Path(exists=True, file_okay=False), help="Path to the repository.")
 @click.option("--question", help="Natural language question about the repo.")
@@ -71,7 +95,14 @@ def _print_answer_panels(response, attribution: dict, confidence: dict, total_fi
 @click.option("--port", default=8000, show_default=True, help="Local port for the MCP server.")
 @click.option("--output", type=click.Choice(["text", "json"]), default="text", show_default=True)
 @click.option("--verify", "verify_session_id", default=None, help="Run faithfulness verification on an existing session id instead of asking a new question.")
-def main(repo: str | None, question: str | None, model: str, max_files: int, port: int, output: str, verify_session_id: str | None):
+@click.option("--stability", is_flag=True, help="Run the question N times and report answer stability (Jaccard over files read).")
+@click.option("--runs", default=3, show_default=True, help="Number of runs for --stability.")
+@click.option("--index", "use_index", is_flag=True, help="Build/query a ChromaDB index and prepend relevant chunks to the question (best for repos >500 files).")
+@click.option("--yes", "-y", is_flag=True, help="Skip the cost confirmation prompt for --stability.")
+def main(
+    repo: str | None, question: str | None, model: str, max_files: int, port: int, output: str,
+    verify_session_id: str | None, stability: bool, runs: int, use_index: bool, yes: bool,
+):
     if verify_session_id:
         from xai.faithfulness import FAITHFULNESS_WARNING_THRESHOLD, run_faithfulness_check
 
@@ -86,14 +117,34 @@ def main(repo: str | None, question: str | None, model: str, max_files: int, por
 
     repo_path = Path(repo).resolve()
     total_files = mcp_server._count_files(mcp_server._build_tree(repo_path))
-
     _start_local_mcp_server(repo_path, port)
+    mcp_server_url = os.environ.get("MCP_SERVER_URL", f"http://127.0.0.1:{port}/mcp/")
+    context_prefix = _build_index_context(repo_path, question) if use_index else None
+
+    if stability:
+        from xai.stability import run_stability_check
+
+        click.secho(f"This runs the question {runs} times (~{runs}x normal API cost).", fg="yellow")
+        if not yes and not click.confirm("Proceed?", default=True):
+            click.echo("Aborted.")
+            return
+        result = run_stability_check(
+            question, str(repo_path), runs=runs, model=model, max_files=max_files,
+            mcp_server_url=mcp_server_url, context_prefix=context_prefix,
+        )
+        if output == "json":
+            click.echo(json.dumps(result, indent=2))
+        else:
+            _print_stability_report(result)
+        return
+
     response = run_query(
         repo_path=str(repo_path),
         question=question,
         model=model,
         max_files=max_files,
-        mcp_server_url=os.environ.get("MCP_SERVER_URL", f"http://127.0.0.1:{port}/mcp/"),
+        mcp_server_url=mcp_server_url,
+        context_prefix=context_prefix,
     )
 
     is_not_found = response.json_header.get("result") == "not_found"
