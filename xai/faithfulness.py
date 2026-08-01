@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import re
 from pathlib import Path
 
 from anthropic import Anthropic
@@ -58,8 +59,22 @@ def run_faithfulness_check(session_id: str, model: str = DEFAULT_MODEL, client: 
     else:
         client = client or Anthropic()
         prompt = VERIFY_PROMPT_TEMPLATE.format(claims_json=json.dumps(claims, indent=2))
-        message = client.messages.create(model=model, max_tokens=4000, messages=[{"role": "user", "content": prompt}])
-        verdicts = json.loads(message.content[0].text)
+        # claude-sonnet-5 defaults to adaptive thinking even when not asked
+        # for it — a real run burned the whole 4000-token budget thinking and
+        # hit max_tokens before writing any text at all. This call only wants
+        # a deterministic JSON array back, so thinking is disabled outright.
+        message = client.messages.create(
+            model=model, max_tokens=4000, thinking={"type": "disabled"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        # Defensive: find the actual text block rather than assuming index 0,
+        # in case a future model still emits a non-text block first.
+        text_block = next(block for block in message.content if block.type == "text")
+        # A real run wrapped the reply in ```json fences despite the prompt
+        # explicitly saying not to — strip them before parsing if present.
+        raw = text_block.text.strip()
+        fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.DOTALL)
+        verdicts = json.loads(fenced.group(1) if fenced else raw)
 
         verified = sum(1 for v in verdicts if v["verdict"] == "VERIFIED")
         partial = sum(1 for v in verdicts if v["verdict"] == "PARTIAL")

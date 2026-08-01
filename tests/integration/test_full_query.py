@@ -120,7 +120,7 @@ def test_verify_appends_to_session(logs_dir, monkeypatch):
 
     verdicts = [{"claim_index": 0, "claim_summary": "login location", "verdict": "VERIFIED", "evidence": "", "explanation": ""}]
     fake_verify_client = SimpleNamespace(
-        messages=SimpleNamespace(create=lambda **k: SimpleNamespace(content=[SimpleNamespace(text=json.dumps(verdicts))]))
+        messages=SimpleNamespace(create=lambda **k: SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(verdicts))]))
     )
     monkeypatch.setattr(faithfulness_mod, "Anthropic", lambda: fake_verify_client)
 
