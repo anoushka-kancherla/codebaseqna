@@ -562,7 +562,7 @@ The README is a portfolio artifact. It must include:
 - One-paragraph description of the tool and why it exists
 - The architecture diagram from this file (verbatim)
 - Install instructions: `git clone`, `pip install -r requirements.txt`, `.env` setup
-- Usage examples for all five CLI modes: basic, `--verify`, `--stability`, `--output json`, `--index`
+- Usage examples for all six CLI modes: basic, `--verify`, `--stability`, `--output json`, `--index`, `--interactive`
 - XAI features section: one paragraph per principle, what it does, what formal XAI
   concept it implements — written for a technical but non-specialist audience
 - Connection to SHAP stability research: one paragraph explaining the Jaccard stability
@@ -581,6 +581,32 @@ The README is a portfolio artifact. It must include:
 [ ] GitHub repository is public with clean commit history
 [ ] Session log for every integration test contains all required top-level keys
 ```
+
+---
+
+## Post-Phase-5 addition: `--interactive`
+
+Not part of the original five phases — added afterward to remove the friction of
+restarting the MCP server for every single question against the same repo.
+
+- `--interactive` / `-i`: starts the local MCP server once, then loops on `input()` for
+  multiple questions against the same repo. `--repo` is still required; `--question` is
+  not. Rejected in combination with `--verify` or `--stability` (raises `UsageError`) —
+  those stay one-shot modes.
+- Each question is still an **independent, stateless Claude call** — no message history
+  is threaded between turns, and each gets its own session id and its own
+  `logs/{session_id}.json`. Only the MCP server process (and, with `--index`, the built
+  ChromaDB index) persists across questions.
+- **Critical:** `mcp_server.NAV_LOG` is a module-level instance that accumulates every
+  read for as long as the server process is alive. One-shot invocations get a fresh
+  instance for free (one process = one question), but the interactive loop must
+  explicitly do `mcp_server.NAV_LOG = NavigationLog()` before every question — otherwise
+  navigation entries and `coverage_pct` leak across questions in the same session.
+- **`--index` interaction:** `build_index()` re-walks and re-embeds the whole repo on
+  every call, so it must run once before the loop starts, not per question.
+  `query_index()` runs fresh per question.
+- Exits cleanly on `exit`, `quit`, empty input, Ctrl-D (`EOFError`), or Ctrl-C
+  (`KeyboardInterrupt`) — no traceback.
 
 ---
 
@@ -682,6 +708,7 @@ python cli.py --repo /path/to/repo --question "..." --verify
 python cli.py --repo /path/to/repo --question "..." --stability --runs 3
 python cli.py --repo /path/to/repo --question "..." --index
 python cli.py --repo /path/to/repo --question "..." --output json
+python cli.py --repo /path/to/repo --interactive
 
 # Test
 pytest tests/unit/

@@ -148,6 +148,50 @@ def test_cli_stability_aborts_without_confirmation(tmp_path, monkeypatch):
     assert "Aborted" in result.output
 
 
+def test_cli_interactive_two_questions_independent_nav_logs(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\nworld\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        mcp_server.get_tree_json()
+        mcp_server.get_file_json("README.md")
+        return ParsedResponse(
+            thinking="", json_header={"confidence": "low"}, prose=f"answer to {question}",
+            tool_results=[], usage={},
+        )
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        ["--repo", str(tmp_path), "--interactive", "--port", "8007"],
+        input="question one\nquestion two\nexit\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    session_files = sorted(tmp_path.glob("*.json"))
+    assert len(session_files) == 2
+    for f in session_files:
+        data = json.loads(f.read_text())
+        # If NAV_LOG weren't reset between questions, the second session would show
+        # 2 accumulated file reads instead of 1.
+        assert data["navigation"]["files_read"] == 1
+
+
+def test_cli_interactive_rejects_combination_with_stability():
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--interactive", "--stability"])
+    assert result.exit_code != 0
+    assert "cannot be combined" in result.output
+
+
+def test_cli_interactive_rejects_combination_with_verify():
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--interactive", "--verify", "abc123"])
+    assert result.exit_code != 0
+    assert "cannot be combined" in result.output
+
+
 def test_cli_index_flag_prepends_context(tmp_path, monkeypatch):
     (tmp_path / "auth.py").write_text("def login():\n    pass\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
