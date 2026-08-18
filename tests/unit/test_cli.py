@@ -336,3 +336,43 @@ def test_cli_env_defaults_applied(monkeypatch):
         monkeypatch.delenv("CODEBASEQNA_MAX_FILES", raising=False)
         monkeypatch.delenv("CODEBASEQNA_REPO", raising=False)
         importlib.reload(cli)
+
+
+def test_cli_auto_activates_index_for_large_repo(tmp_path, monkeypatch):
+    (tmp_path / "auth.py").write_text("def login():\n    pass\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+    monkeypatch.setattr("retrieval.chroma_index.LARGE_REPO_THRESHOLD", 0)
+
+    captured = {}
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        captured["context_prefix"] = context_prefix
+        return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "where is login?", "--port", "8013"])
+
+    assert result.exit_code == 0, result.output
+    assert "auto-enabling --index" in result.output
+    assert captured["context_prefix"] is not None
+    assert "login" in captured["context_prefix"]
+
+
+def test_cli_small_repo_does_not_auto_activate_index(tmp_path, monkeypatch):
+    (tmp_path / "auth.py").write_text("def login():\n    pass\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    captured = {}
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        captured["context_prefix"] = context_prefix
+        return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "where is login?", "--port", "8014"])
+
+    assert result.exit_code == 0, result.output
+    assert "auto-enabling --index" not in result.output
+    assert captured["context_prefix"] is None

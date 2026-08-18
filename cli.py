@@ -245,6 +245,14 @@ def main(
     _start_local_mcp_server(repo_path, port)
     mcp_server_url = os.environ.get("MCP_SERVER_URL", f"http://127.0.0.1:{port}/mcp/")
 
+    from retrieval.chroma_index import LARGE_REPO_THRESHOLD
+    if not use_index and total_files > LARGE_REPO_THRESHOLD:
+        click.secho(
+            f"Repo has {total_files} files (> {LARGE_REPO_THRESHOLD}) — auto-enabling --index.",
+            fg="yellow",
+        )
+        use_index = True
+
     if use_index:
         _build_chroma_index(repo_path)
 

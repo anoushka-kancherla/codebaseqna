@@ -541,6 +541,11 @@ consistent files, inconsistent files, and stability rating.
 - When `--index` is active, prepend top-k chunks to the user message before the API call
 - Activate only for repos >500 files. `repo_root` must be absolute and consistent
   between `build_index` and `query_index` — a mismatch causes silent empty results.
+  **Implemented in `cli.py`:** after computing `total_files`, a lazy
+  `from retrieval.chroma_index import LARGE_REPO_THRESHOLD` plus
+  `if not use_index and total_files > LARGE_REPO_THRESHOLD: use_index = True` auto-enables
+  indexing, with a `click.secho` warning so the (real, non-trivial) embedding cost isn't
+  incurred silently. Explicit `--index` still works unchanged for smaller repos.
 
 ### Integration tests
 
@@ -578,16 +583,23 @@ The README is a portfolio artifact. It must include:
 [ ] faithfulness_score always in [0.0, 1.0] across five --verify runs
 [ ] README with architecture diagram and XAI documentation committed
 [ ] Demo GIF recorded and embedded in README
-[ ] GitHub repository is public with clean commit history
+[x] GitHub repository is public with clean commit history — verified: github.com/anoushka-kancherla/codebaseqna
+    renders publicly (no login wall/"Private" label); `git log --oneline` shows a clean,
+    phase-aligned sequence with no wip/noise commits
 [ ] Session log for every integration test contains all required top-level keys
 ```
 
 ---
 
-## Post-Phase-5 addition: `--interactive`
+## Post-Phase-5 additions
 
-Not part of the original five phases — added afterward to remove the friction of
-restarting the MCP server for every single question against the same repo.
+Not part of the original five phases — added afterward as usability improvements on top
+of the finished tool.
+
+### `--interactive`
+
+Added to remove the friction of restarting the MCP server for every single question
+against the same repo.
 
 - `--interactive` / `-i`: starts the local MCP server once, then loops on `input()` for
   multiple questions against the same repo. `--repo` is still required; `--question` is
@@ -607,6 +619,54 @@ restarting the MCP server for every single question against the same repo.
   `query_index()` runs fresh per question.
 - Exits cleanly on `exit`, `quit`, empty input, Ctrl-D (`EOFError`), or Ctrl-C
   (`KeyboardInterrupt`) — no traceback.
+
+### `--verbose`
+
+Prints the full thinking block instead of truncating to 400 chars. Fixes a previously
+dangling promise: the thinking panel always printed `[--verbose to expand]` even though
+no such flag existed until this addition.
+
+### `--list-sessions` / `--show-session <id>`
+
+Browse `logs/*.json` from the CLI instead of grepping the directory by hand.
+`--list-sessions` prints `session_id  created_at  question` for every saved session.
+`--show-session <id>` reconstructs the same prose/confidence/files-read panels a live
+query would print, sourced from the saved session dict rather than a `ParsedResponse` —
+note the per-file `reason` strings aren't persisted in the session schema (only
+`navigation.reads` paths are), so `--show-session` lists files read without the
+original reasons Claude gave for reading them.
+
+### Per-query cost estimate
+
+Every query prints an approximate `$` cost after the answer, computed from
+`response.usage` (`input_tokens`, `output_tokens`) against a static `PRICING_PER_MTOK`
+table in `cli.py`, matched by substring against the model name (`opus`/`sonnet`/`haiku`).
+This is a rough estimate for eyeballing cost before running `--stability`, not a billing
+figure — the streaming parser doesn't reliably capture `input_tokens` in every code path
+(see `api/stream_parser.py`), so treat it as approximate.
+
+### Config defaults via `.env`
+
+`CODEBASEQNA_REPO`, `CODEBASEQNA_MODEL`, and `CODEBASEQNA_MAX_FILES` env vars (loaded via
+the existing `python-dotenv` dependency) override the `--repo`/`--model`/`--max-files`
+CLI defaults, so a repo you query repeatedly doesn't require retyping those flags. CLI
+flags still take precedence when passed explicitly.
+
+### Shell completion
+
+`main(prog_name="codebaseqna")` in the `if __name__ == "__main__":` block gives Click's
+built-in completion a clean env var name (`_CODEBASEQNA_COMPLETE`) instead of the
+dotted, invalid-as-an-env-var default Click would otherwise derive from `cli.py`. Enable
+with `eval "$(_CODEBASEQNA_COMPLETE=bash_source python cli.py)"` (or `zsh_source`).
+
+### ChromaDB auto-activation
+
+Closed the gap between the Phase 5 spec ("activate only for repos >500 files") and the
+implementation (previously `--index` was manual-only). See the ChromaDB section above
+for the actual `cli.py` snippet — reuses `LARGE_REPO_THRESHOLD` from
+`retrieval/chroma_index.py` rather than duplicating the constant, and warns via
+`click.secho` before auto-enabling since the embedding pass has a real cost the user
+didn't explicitly ask for.
 
 ---
 
@@ -709,6 +769,9 @@ python cli.py --repo /path/to/repo --question "..." --stability --runs 3
 python cli.py --repo /path/to/repo --question "..." --index
 python cli.py --repo /path/to/repo --question "..." --output json
 python cli.py --repo /path/to/repo --interactive
+python cli.py --repo /path/to/repo --question "..." --verbose
+python cli.py --list-sessions
+python cli.py --show-session <session-id>
 
 # Test
 pytest tests/unit/
