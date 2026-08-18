@@ -78,13 +78,16 @@ def test_parse_stream_separates_thinking_and_text():
     assert result.thinking == "pondering..."
     assert result.json_header == {"confidence": "high"}
     assert result.prose == "The answer is here."
+    assert result.raw_text == '{"confidence": "high"} The answer is here.'
     assert result.usage == {"output_tokens": 42, "input_tokens": 10}
     assert result.tool_results == []
 
 
-def test_parse_stream_skips_signature_delta_in_thinking_block():
+def test_parse_stream_captures_thinking_signature_for_multi_turn_replay():
     # Adaptive thinking mode interleaves a signature_delta (no .thinking attr)
-    # into the thinking content block, used for multi-turn continuity only.
+    # into the thinking content block; it must be captured (not dropped) since
+    # multi-turn continuation needs to replay the thinking block verbatim,
+    # signature included.
     events = [
         _event("content_block_start", content_block=SimpleNamespace(type="thinking")),
         _event("content_block_delta", delta=SimpleNamespace(thinking="pondering...")),
@@ -94,6 +97,7 @@ def test_parse_stream_skips_signature_delta_in_thinking_block():
     ]
     result = parse_stream(events)
     assert result.thinking == "pondering..."
+    assert result.thinking_signature == "sig-xyz"
     assert result.prose == "The answer is here."
 
 

@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import click
@@ -12,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from api.query import DEFAULT_MODEL, run_query
+from api.query import DEFAULT_MODEL, build_user_content, run_query
 from server import mcp_server
 from server.navigation_log import NavigationLog
 from qa_types import session as session_module
@@ -136,6 +137,7 @@ def _print_answer_panels(response, attribution: dict, confidence: dict, total_fi
 def _answer_question(
     question: str, repo_path: Path, model: str, max_files: int, mcp_server_url: str,
     context_prefix: str | None, output: str, total_files: int, verbose: bool = False,
+    history: list[dict] | None = None, conversation_id: str | None = None, turn_index: int | None = None,
 ):
     response = run_query(
         repo_path=str(repo_path),
@@ -144,6 +146,7 @@ def _answer_question(
         max_files=max_files,
         mcp_server_url=mcp_server_url,
         context_prefix=context_prefix,
+        history=history,
     )
 
     is_not_found = response.json_header.get("result") == "not_found"
@@ -161,16 +164,19 @@ def _answer_question(
         response=response,
         attribution=attribution,
         confidence=confidence,
+        conversation_id=conversation_id,
+        turn_index=turn_index,
     )
     session_path = session.save()
 
     if output == "json":
         click.echo(json.dumps(session.to_dict(), indent=2))
-        return
+        return response
 
     _print_answer_panels(response, attribution, confidence, total_files, session.navigation["coverage_pct"], verbose)
     click.echo(f"Estimated cost: ${_estimate_cost_usd(response.usage, model):.4f}")
     click.echo(f"\nSession saved to {session_path}")
+    return response
 
 
 def _print_session_summary(data: dict):
@@ -226,11 +232,12 @@ def _print_stability_report(result: dict):
 @click.option("--list-sessions", "list_sessions", is_flag=True, help="List saved sessions from ./logs and exit.")
 @click.option("--show-session", "show_session_id", default=None, help="Print a saved session by id and exit.")
 @click.option("--tunnel", "use_tunnel", is_flag=True, help="Auto-start an ngrok tunnel so Anthropic's MCP connector can reach the local server, instead of setting MCP_SERVER_URL manually.")
+@click.option("--memory", "use_memory", is_flag=True, help="With --interactive, carry conversation history (including thinking blocks) between questions instead of asking each one statelessly.")
 def main(
     repo: str | None, question: str | None, model: str, max_files: int, port: int, output: str,
     verify_session_id: str | None, stability: bool, runs: int, use_index: bool, yes: bool,
     interactive: bool, verbose: bool, list_sessions: bool, show_session_id: str | None,
-    use_tunnel: bool,
+    use_tunnel: bool, use_memory: bool,
 ):
     if list_sessions:
         logs_dir = session_module.LOGS_DIR
@@ -252,6 +259,9 @@ def main(
 
     if interactive and (verify_session_id or stability):
         raise click.UsageError("--interactive cannot be combined with --verify or --stability.")
+
+    if use_memory and not interactive:
+        raise click.UsageError("--memory requires --interactive.")
 
     if verify_session_id:
         from xai.faithfulness import FAITHFULNESS_WARNING_THRESHOLD, run_faithfulness_check
@@ -306,6 +316,9 @@ def main(
             return
 
         if interactive:
+            conversation_id = str(uuid.uuid4()) if use_memory else None
+            conversation_history: list[dict] = []
+            turn_index = 0
             while True:
                 try:
                     q = input("\n> ").strip()
@@ -316,7 +329,23 @@ def main(
                     break
                 mcp_server.NAV_LOG = NavigationLog()
                 context_prefix = _query_chroma_context(q) if use_index else None
-                _answer_question(q, repo_path, model, max_files, mcp_server_url, context_prefix, output, total_files, verbose)
+                response = _answer_question(
+                    q, repo_path, model, max_files, mcp_server_url, context_prefix, output, total_files, verbose,
+                    history=conversation_history if use_memory else None,
+                    conversation_id=conversation_id,
+                    turn_index=turn_index if use_memory else None,
+                )
+                if use_memory:
+                    conversation_history.append({"role": "user", "content": build_user_content(q, context_prefix)})
+                    assistant_blocks = []
+                    if response.thinking:
+                        assistant_blocks.append({
+                            "type": "thinking", "thinking": response.thinking,
+                            "signature": response.thinking_signature,
+                        })
+                    assistant_blocks.append({"type": "text", "text": response.raw_text})
+                    conversation_history.append({"role": "assistant", "content": assistant_blocks})
+                    turn_index += 1
             return
 
         context_prefix = _query_chroma_context(question) if use_index else None

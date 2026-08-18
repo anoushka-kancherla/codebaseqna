@@ -13,7 +13,7 @@ def test_cli_end_to_end_with_mocked_claude(tmp_path, monkeypatch):
     (tmp_path / "README.md").write_text("hello\nworld\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         # Simulate what Claude would do via the MCP connector: read the tree,
         # then read a file, then answer citing it.
         mcp_server.get_tree_json()
@@ -49,7 +49,7 @@ def test_cli_not_found_shows_search_report_instead_of_prose(tmp_path, monkeypatc
     (tmp_path / "README.md").write_text("hello\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         return ParsedResponse(
             thinking="",
             json_header={
@@ -79,7 +79,7 @@ def test_cli_flags_invalid_citation(tmp_path, monkeypatch):
     (tmp_path / "README.md").write_text("hello\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         return ParsedResponse(
             thinking="",
             json_header={"confidence": "low", "files_read": ["README.md"]},
@@ -153,7 +153,7 @@ def test_cli_interactive_two_questions_independent_nav_logs(tmp_path, monkeypatc
     (tmp_path / "README.md").write_text("hello\nworld\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         mcp_server.get_tree_json()
         mcp_server.get_file_json("README.md")
         return ParsedResponse(
@@ -193,13 +193,92 @@ def test_cli_interactive_rejects_combination_with_verify():
     assert "cannot be combined" in result.output
 
 
+def test_cli_memory_requires_interactive():
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", ".", "--question", "q?", "--memory"])
+    assert result.exit_code != 0
+    assert "--memory requires --interactive" in result.output
+
+
+def test_cli_memory_threads_history_between_turns(tmp_path, monkeypatch):
+    (tmp_path / "auth.py").write_text("def login():\n    pass\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    calls = []
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
+        calls.append(list(history) if history is not None else None)
+        return ParsedResponse(
+            thinking=f"thinking about {question}",
+            thinking_signature=f"sig-{len(calls)}",
+            json_header={"confidence": "low"},
+            prose=f"answer to {question}",
+            raw_text=f'{{"confidence": "low"}} answer to {question}',
+            tool_results=[], usage={},
+        )
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        ["--repo", str(tmp_path), "--interactive", "--memory", "--port", "8018"],
+        input="question one\nquestion two\nexit\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 2
+
+    # First call has no prior history.
+    assert calls[0] == []
+
+    # Second call's history contains turn one's user + assistant messages,
+    # with the thinking block replayed verbatim (signature included).
+    assert calls[1] == [
+        {"role": "user", "content": "question one"},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "thinking about question one", "signature": "sig-1"},
+            {"type": "text", "text": '{"confidence": "low"} answer to question one'},
+        ]},
+    ]
+
+    session_files = sorted(tmp_path.glob("*.json"), key=lambda f: f.stat().st_mtime)
+    assert len(session_files) == 2
+    data_0 = json.loads(session_files[0].read_text())
+    data_1 = json.loads(session_files[1].read_text())
+    assert data_0["conversation_id"] == data_1["conversation_id"]
+    assert data_0["conversation_id"] is not None
+    assert data_0["turn_index"] == 0
+    assert data_1["turn_index"] == 1
+
+
+def test_cli_interactive_without_memory_has_no_conversation_id(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
+        return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        ["--repo", str(tmp_path), "--interactive", "--port", "8019"],
+        input="question one\nexit\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(next(tmp_path.glob("*.json")).read_text())
+    assert data["conversation_id"] is None
+    assert data["turn_index"] is None
+
+
 def test_cli_index_flag_prepends_context(tmp_path, monkeypatch):
     (tmp_path / "auth.py").write_text("def login():\n    pass\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
     captured = {}
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         captured["context_prefix"] = context_prefix
         return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
 
@@ -217,7 +296,7 @@ def test_cli_verbose_shows_full_thinking(tmp_path, monkeypatch):
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
     long_thinking = "x" * 500
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         return ParsedResponse(thinking=long_thinking, json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
 
     monkeypatch.setattr(cli, "run_query", fake_run_query)
@@ -234,7 +313,7 @@ def test_cli_without_verbose_truncates_thinking(tmp_path, monkeypatch):
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
     long_thinking = "x" * 500
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         return ParsedResponse(thinking=long_thinking, json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
 
     monkeypatch.setattr(cli, "run_query", fake_run_query)
@@ -250,7 +329,7 @@ def test_cli_prints_estimated_cost(tmp_path, monkeypatch):
     (tmp_path / "README.md").write_text("hello\n")
     monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         return ParsedResponse(
             thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[],
             usage={"input_tokens": 1_000_000, "output_tokens": 1_000_000},
@@ -345,7 +424,7 @@ def test_cli_auto_activates_index_for_large_repo(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         captured["context_prefix"] = context_prefix
         return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
 
@@ -365,7 +444,7 @@ def test_cli_small_repo_does_not_auto_activate_index(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         captured["context_prefix"] = context_prefix
         return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
 
@@ -393,7 +472,7 @@ def test_cli_tunnel_flag_uses_ngrok_url(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         captured["mcp_server_url"] = mcp_server_url
         return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
 
@@ -419,7 +498,7 @@ def test_cli_tunnel_stopped_even_when_query_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_start_ngrok_tunnel", lambda port: "https://fake.ngrok.io/mcp/")
     monkeypatch.setattr(cli, "_stop_ngrok_tunnel", lambda: calls.__setitem__("stop_count", calls["stop_count"] + 1))
 
-    def raising_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def raising_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(cli, "run_query", raising_run_query)
@@ -441,7 +520,7 @@ def test_cli_without_tunnel_flag_ngrok_never_touched(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_start_ngrok_tunnel", fail_if_called)
     monkeypatch.setattr(cli, "_stop_ngrok_tunnel", fail_if_called)
 
-    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None, history=None):
         return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
 
     monkeypatch.setattr(cli, "run_query", fake_run_query)

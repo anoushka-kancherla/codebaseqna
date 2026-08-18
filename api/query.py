@@ -29,6 +29,8 @@ git_diff, git_blame, search_symbol.
    Format: `src/auth/validate.py:45-67`
 6. Never state something as fact if inferred from a file name alone.
 7. Stop reading files once you have sufficient evidence. Do not read speculatively.
+8. If earlier turns are shown above, you may build on those findings without re-reading
+   the same files, but every new factual claim still needs its own file:line citation.
 
 ## Response format
 Begin every response with this JSON block, then your prose answer:
@@ -53,6 +55,10 @@ Begin every response with this JSON block, then your prose answer:
 """
 
 
+def build_user_content(question: str, context_prefix: str | None) -> str:
+    return f"{context_prefix}\n\n{question}" if context_prefix else question
+
+
 def run_query(
     repo_path: str,
     question: str,
@@ -62,14 +68,16 @@ def run_query(
     client: Anthropic | None = None,
     mcp_server_url: str | None = None,
     context_prefix: str | None = None,
+    history: list[dict] | None = None,
 ) -> ParsedResponse:
     client = client or Anthropic()
-    content = f"{context_prefix}\n\n{question}" if context_prefix else question
+    content = build_user_content(question, context_prefix)
+    messages = [*(history or []), {"role": "user", "content": content}]
     params = dict(
         model=model,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT_TEMPLATE.format(repo_path=repo_path, max_files=max_files),
-        messages=[{"role": "user", "content": content}],
+        messages=messages,
         mcp_servers=[{"type": "url", "url": mcp_server_url or MCP_SERVER_URL, "name": "codebase"}],
         betas=[MCP_BETA_FLAG],
     )

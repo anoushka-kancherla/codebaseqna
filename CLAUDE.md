@@ -692,6 +692,47 @@ HTTPS URL in front of it, previously a fully manual `ngrok http 8000` +
   pre-authenticated, `--tunnel` needs no extra setup.
 - New dependency: `pyngrok` (added to `requirements.txt`).
 
+### `--memory` (true multi-turn conversation, requires `--interactive`)
+
+Upgrades `--interactive` from independent, stateless questions to a real conversation:
+prior turns are threaded into each new Claude call via the API's `messages` history.
+Plain `--interactive` (no `--memory`) is completely unchanged — this is additive.
+
+- **Thinking-block replay, confirmed live-tested and working:** Anthropic's extended
+  thinking generally requires a prior turn's thinking block to be replayed verbatim
+  (signature included) when a conversation with thinking enabled continues.
+  `api/stream_parser.py`'s `parse_stream` now captures `signature_delta` events (it used
+  to discard them — there was already a comment anticipating this) into a new
+  `ParsedResponse.thinking_signature` field, alongside a new `raw_text` field holding the
+  full pre-`split_json_header` text block (used to replay the assistant's prior text turn
+  byte-for-byte, since reconstructing from `prose`+`json_header` would be lossy for the
+  "raw JSON dropped mid-prose" fallback case `split_json_header` already handles). Both
+  fields default to `""` so every existing `ParsedResponse(...)` construction site
+  (mocks, tests) is unaffected. **Live-tested against the real API and confirmed
+  working** — a two-turn `--interactive --memory` conversation completed successfully,
+  and the second answer explicitly referenced the first turn's finding.
+- `api/query.py` gained `build_user_content(question, context_prefix)` (factored out of
+  `run_query`'s inline content-building, reused by `cli.py`'s history accumulation so the
+  formatting isn't duplicated) and a `history: list[dict] | None = None` param on
+  `run_query`, prepended to `messages` before the new user turn.
+- `cli.py`'s interactive loop builds `conversation_history` only when `--memory` is set,
+  appending a user turn plus an assistant turn (`[thinking block (if any), text block]`,
+  using `raw_text` for the text block) after every response, and passes it as `history`
+  to the next call. `_answer_question` now returns the `ParsedResponse` so the loop can
+  read `thinking`/`thinking_signature`/`raw_text` off it.
+- **Navigation log still resets every turn** (`mcp_server.NAV_LOG = NavigationLog()`,
+  unchanged) — multi-turn memory is about what the model remembers, not audit-log
+  granularity; those stay orthogonal.
+- **Session schema, additive:** `SessionLog`/`build_session_log` gained
+  `conversation_id: str | None` and `turn_index: int | None`, both `null` unless
+  `--memory` is active — a fresh `conversation_id` (`uuid.uuid4()`) is generated once per
+  interactive session and shared across that session's turns, with `turn_index`
+  incrementing from 0. One JSON file per turn still (no merged conversation file) —
+  `--list-sessions`/`--show-session` work unchanged; grouping by `conversation_id` is
+  left as a query the user does themselves for now.
+- `--memory` without `--interactive` raises `click.UsageError` (same pattern as the
+  existing `--interactive`+`--stability`/`--verify` conflict check).
+
 ---
 
 ## Session log schema
@@ -726,7 +767,9 @@ XAI fields as null — it avoids schema drift when Phase 4 adds the XAI fields.
     "not_found": null
   },
   "faithfulness": null,
-  "api_usage": {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
+  "api_usage": {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0},
+  "conversation_id": null,
+  "turn_index": null
 }
 ```
 
@@ -797,6 +840,7 @@ python cli.py --repo /path/to/repo --question "..." --verbose
 python cli.py --list-sessions
 python cli.py --show-session <session-id>
 python cli.py --repo /path/to/repo --question "..." --tunnel
+python cli.py --repo /path/to/repo --interactive --memory
 
 # Test
 pytest tests/unit/

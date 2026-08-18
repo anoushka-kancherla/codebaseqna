@@ -53,3 +53,28 @@ def test_run_query_thinking_disabled_omits_thinking_param():
     captured = {}
     run_query(repo_path="/repo", question="q", client=_fake_client(captured), mcp_server_url="http://x/mcp/", thinking_enabled=False)
     assert "thinking" not in captured
+
+
+def test_run_query_prepends_history_before_new_user_turn():
+    captured = {}
+    history = [
+        {"role": "user", "content": "where is auth?"},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "checking auth.py", "signature": "sig-1"},
+            {"type": "text", "text": '{"confidence": "high"} It is in auth.py.'},
+        ]},
+    ]
+    run_query(
+        repo_path="/repo", question="what about the token refresh path?", client=_fake_client(captured),
+        mcp_server_url="http://x/mcp/", history=history,
+    )
+    assert captured["messages"] == [
+        *history,
+        {"role": "user", "content": "what about the token refresh path?"},
+    ]
+
+
+def test_run_query_without_history_sends_single_user_turn():
+    captured = {}
+    run_query(repo_path="/repo", question="q", client=_fake_client(captured), mcp_server_url="http://x/mcp/")
+    assert captured["messages"] == [{"role": "user", "content": "q"}]

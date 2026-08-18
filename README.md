@@ -113,6 +113,11 @@ python cli.py --repo /path/to/repo --question "where is auth handled?" --index
 # server between them. Each question is still an independent, stateless Claude call.
 python cli.py --repo /path/to/repo --interactive
 
+# Interactive mode with real conversation memory: prior turns (including Claude's
+# reasoning) are carried into each new question, so follow-ups like "what about the
+# token refresh path?" build on earlier findings instead of starting from scratch.
+python cli.py --repo /path/to/repo --interactive --memory
+
 # Full thinking block instead of the first 400 chars
 python cli.py --repo /path/to/repo --question "where is auth handled?" --verbose
 

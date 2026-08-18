@@ -11,6 +11,8 @@ class ParsedResponse:
     prose: str
     tool_results: list[dict]
     usage: dict
+    thinking_signature: str = ""
+    raw_text: str = ""
 
 
 def split_json_header(text: str) -> tuple[dict, str]:
@@ -56,7 +58,7 @@ def split_json_header(text: str) -> tuple[dict, str]:
 
 
 def parse_stream(stream) -> ParsedResponse:
-    thinking_parts, text_parts, tool_results = [], [], []
+    thinking_parts, signature_parts, text_parts, tool_results = [], [], [], []
     current_block = None
     usage = {}
     for event in stream:
@@ -64,9 +66,12 @@ def parse_stream(stream) -> ParsedResponse:
             current_block = event.content_block.type
         elif event.type == "content_block_delta":
             # Adaptive thinking blocks interleave a signature_delta (no .thinking
-            # attribute, used for multi-turn continuity) alongside thinking_delta.
+            # attribute) alongside thinking_delta — the signature must be replayed
+            # verbatim with the thinking block for multi-turn continuity.
             if current_block == "thinking" and hasattr(event.delta, "thinking"):
                 thinking_parts.append(event.delta.thinking)
+            elif current_block == "thinking" and hasattr(event.delta, "signature"):
+                signature_parts.append(event.delta.signature)
             elif current_block == "text" and hasattr(event.delta, "text"):
                 text_parts.append(event.delta.text)
         elif event.type == "message_delta":
@@ -78,6 +83,7 @@ def parse_stream(stream) -> ParsedResponse:
     json_header, prose = split_json_header(full_text)
     return ParsedResponse(
         thinking="".join(thinking_parts),
-        json_header=json_header, prose=prose,
+        thinking_signature="".join(signature_parts),
+        json_header=json_header, prose=prose, raw_text=full_text,
         tool_results=tool_results, usage=usage
     )

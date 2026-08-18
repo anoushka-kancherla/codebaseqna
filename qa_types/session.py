@@ -25,6 +25,8 @@ class SessionLog:
     confidence: dict | None = None
     faithfulness: dict | None = None
     api_usage: dict = field(default_factory=dict)
+    conversation_id: str | None = None
+    turn_index: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -40,6 +42,8 @@ class SessionLog:
             "answer": self.answer,
             "faithfulness": self.faithfulness,
             "api_usage": self.api_usage,
+            "conversation_id": self.conversation_id,
+            "turn_index": self.turn_index,
         }
 
     def save(self) -> Path:
@@ -60,6 +64,8 @@ def build_session_log(
     response: ParsedResponse,
     attribution: dict | None = None,
     confidence: dict | None = None,
+    conversation_id: str | None = None,
+    turn_index: int | None = None,
 ) -> SessionLog:
     reads = nav_log.to_dict()
     files_read = sum(1 for e in reads if e["event"] == "file_read")
@@ -86,4 +92,6 @@ def build_session_log(
         attribution=attribution,
         confidence=confidence,
         api_usage=response.usage,
+        conversation_id=conversation_id,
+        turn_index=turn_index,
     )
