@@ -35,7 +35,7 @@ cli.py  (Click)
     │
     ▼
 api/query.py  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────  Anthropic API
-(query handler,                                                                                                                claude-sonnet-4-20250514
+(query handler,                                                                                                                claude-sonnet-5
  stream parser,                                                                                                                tool_use + thinking
  session writer)                                                                                                                    │
     │                                                                                                                               ▼
@@ -56,40 +56,47 @@ instrumentation right in Phase 1 is the most important work in the project.
 
 ## File structure
 
+**Note:** the original plan called for `types/session.py` and `types/xai.py`, and for
+`xai/scope.py`/`xai/negative.py` as separate Principle-2/3 modules. In practice
+`types/` got renamed to `qa_types/` (avoids shadowing the stdlib `types` module),
+`types/xai.py` was never built (Attribution/Confidence/Faithfulness stayed plain dicts,
+not typed dataclasses — no functional gap, just a structural one), and scope
+transparency / not-found handling live inline in `cli.py` rather than as separate
+files. This is the actual current tree:
+
 ```
-codebase-qa/
+codebaseqna/
 ├── CLAUDE.md
-├── cli.py                          # Click entry point — build in layers across phases
-├── .env                            # ANTHROPIC_API_KEY (never commit)
+├── README.md
+├── LICENSE
+├── cli.py                          # Click entry point — all CLI modes/flags
+├── .env                            # ANTHROPIC_API_KEY, optional NGROK_AUTHTOKEN, CODEBASEQNA_* overrides (never commit)
 ├── requirements.txt
 ├── server/
-│   ├── mcp_server.py               # MCP server with two resources + tool registry
+│   ├── mcp_server.py               # MCP server: resources + list_tree/read_file/git_*/search_symbol tools
 │   ├── navigation_log.py           # NavigationLog class — instrument every read here
 │   └── git_tools.py                # git_log, git_diff, git_blame, search_symbol
 ├── api/
-│   ├── query.py                    # Core query handler, API call construction
-│   └── stream_parser.py            # Parse streaming response into typed blocks
+│   ├── query.py                    # Core query handler, API call construction, build_user_content
+│   └── stream_parser.py            # Parse streaming response into typed blocks (ParsedResponse)
 ├── xai/
 │   ├── attribution.py              # Principle 1: parse + validate file:line citations
-│   ├── scope.py                    # Principle 2: scope transparency from nav log
-│   ├── negative.py                 # Principle 3: not_found handler
 │   ├── confidence.py               # Principle 4: confidence + uncertainty type
 │   ├── faithfulness.py             # Principle 5a: --verify second Claude call
 │   └── stability.py                # Principle 5b: --stability Jaccard score
 ├── retrieval/
-│   └── chroma_index.py             # Optional ChromaDB for repos >500 files (Phase 5)
-├── types/
-│   ├── session.py                  # SessionLog, NavigationEntry dataclasses
-│   └── xai.py                      # Attribution, Confidence, Faithfulness types
+│   └── chroma_index.py             # ChromaDB indexing, auto-activated for repos >500 files
+├── qa_types/
+│   └── session.py                  # SessionLog, build_session_log
 ├── tests/
-│   ├── unit/
-│   │   ├── test_navigation_log.py
-│   │   ├── test_stream_parser.py
-│   │   ├── test_attribution.py
-│   │   └── test_confidence.py
-│   └── integration/
-│       └── test_full_query.py      # Run against tests/fixtures/sample_repo/
-└── logs/                           # Session JSON audit logs (gitignore this)
+│   ├── unit/                       # test_navigation_log.py, test_stream_parser.py, test_attribution.py,
+│   │                                # test_confidence.py, test_faithfulness.py, test_stability.py,
+│   │                                # test_git_tools.py, test_mcp_server_tools.py, test_query.py,
+│   │                                # test_session_log.py, test_chroma_index.py, test_cli.py
+│   ├── integration/
+│   │   └── test_full_query.py      # Run against tests/fixtures/sample_repo/
+│   └── fixtures/sample_repo/       # Small fixture repo (auth.py, README.md) for integration tests
+└── logs/                           # Session JSON audit logs (gitignored)
 ```
 
 ---
@@ -567,7 +574,10 @@ The README is a portfolio artifact. It must include:
 - One-paragraph description of the tool and why it exists
 - The architecture diagram from this file (verbatim)
 - Install instructions: `git clone`, `pip install -r requirements.txt`, `.env` setup
-- Usage examples for all six CLI modes: basic, `--verify`, `--stability`, `--output json`, `--index`, `--interactive`
+- Usage examples for every CLI mode listed in this file's `## Environment` → Run section
+  (basic, `--verify`, `--stability`, `--output json`, `--index`, `--interactive`, plus
+  the post-Phase-5 additions below — `--verbose`, `--list-sessions`/`--show-session`,
+  `--tunnel`, `--memory`)
 - XAI features section: one paragraph per principle, what it does, what formal XAI
   concept it implements — written for a technical but non-specialist audience
 - Connection to SHAP stability research: one paragraph explaining the Jaccard stability
@@ -746,7 +756,7 @@ XAI fields as null — it avoids schema drift when Phase 4 adds the XAI fields.
   "created_at": "ISO 8601",
   "repo_path": "/absolute/path",
   "question": "user question",
-  "model": "claude-sonnet-4-20250514",
+  "model": "claude-sonnet-5",
   "flags": {"max_files": 8, "thinking_enabled": true, "verify": false},
   "navigation": {
     "total_files_in_repo": 312,
@@ -796,9 +806,11 @@ XAI fields as null — it avoids schema drift when Phase 4 adds the XAI fields.
 
 ```python
 # Model
-DEFAULT_MODEL   = "claude-sonnet-4-20250514"
+DEFAULT_MODEL   = "claude-sonnet-5"
 MAX_TOKENS      = 8000
-THINKING_BUDGET = 5000
+THINKING_EFFORT = "medium"   # claude-sonnet-5 uses adaptive thinking + output_config.effort,
+                              # not the older thinking.type=enabled/budget_tokens shape
+MCP_BETA_FLAG   = "mcp-client-2025-04-04"
 
 # MCP server
 MAX_FILE_BYTES  = 500_000
@@ -807,7 +819,7 @@ EXCLUDED_DIRS   = {".git", "node_modules", "__pycache__", "build", "dist", ".ven
 EXCLUDED_EXTS   = {".pyc", ".pyo", ".class", ".o"}
 
 # XAI
-MAX_DIFF_BYTES  = 50_000
+MAX_DIFF_CHARS  = 50_000
 MAX_SYMBOL_HITS = 50
 FAITHFULNESS_WARNING_THRESHOLD = 0.7
 STABILITY_HIGH   = 0.7

@@ -1,13 +1,15 @@
 # codebaseqna
 
-A CLI-first tool that answers natural-language questions about a local code repository —
-"where is authentication handled?", "what changed in the last commit that caused this bug?"
-— by giving Claude scoped, instrumented access to the repo through a custom MCP server and
-returning grounded answers with exact `file:line` citations, a confidence rating, and a full
-audit trail of every file it read. It exists because "ask an LLM about your codebase" tools
-are easy to build and easy to not trust: the interesting engineering problem isn't getting an
-answer, it's proving the answer is attributable, scoped to real evidence, and reproducible.
-That's the XAI (explainable AI) layer, and it's the actual point of this project.
+A CLI tool that answers plain-English questions about a local codebase (“where’s auth
+handled?”, “what changed in the last commit that broke this?”) by handing Claude scoped,
+instrumented access to the repo through a custom MCP server. You get an answer with exact
+`file:line` citations, a confidence rating, and a full audit trail of every file it opened
+to get there.
+
+Plenty of tools will let an LLM answer questions about your code. Fewer of them let you
+check its work. That's really the point of this project: not the Q&A part, which is easy,
+but the explainability layer on top of it: proving an answer is grounded in real files,
+scoped to what was actually read, and reproducible if you ask again.
 
 ## Architecture
 
@@ -19,7 +21,7 @@ cli.py  (Click)
     │
     ▼
 api/query.py  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────  Anthropic API
-(query handler,                                                                                                                claude-sonnet-4-20250514
+(query handler,                                                                                                                claude-sonnet-5
  stream parser,                                                                                                                tool_use + thinking
  session writer)                                                                                                                    │
     │                                                                                                                               ▼
@@ -32,21 +34,20 @@ xai/  (post-processing,                                                         
 logs/{session_id}.json                                                                                                        git_blame, search_symbol
 ```
 
-**A note on that diagram's "Resources" box**: `repo://tree` and `repo://file/{path}` are
-still served as real MCP resources (Phase 1's validation checklist exercises them directly),
-but a real end-to-end run against the live API showed that Anthropic's remote MCP connector
-only exposes a server's *tools* to Claude as things it can call mid-conversation — resources
-are a separate MCP primitive meant for the client app to attach, not something the model can
-fetch on its own. Claude confirmed this directly ("I don't have a direct tool to fetch
-repo://tree") and instead used `search_symbol` to get by, with zero files actually opened. So
-the tree/file access Claude actually uses is exposed as two more tools, `list_tree` and
-`read_file`, which wrap the same instrumented, path-safe functions the resources use — the
-resources stay for direct MCP clients (like the inspector), the tools are what the model
-itself calls.
+Quick note on that "Resources" box, because it took a real run against the live API to
+figure out: `repo://tree` and `repo://file/{path}` are genuinely served as MCP resources
+(the Phase 1 checklist hits them directly), but it turns out Anthropic's remote MCP
+connector only hands the model *tools*, not resources. Resources are for a client app to
+attach, not something Claude can fetch mid-conversation. First time I ran this for real,
+Claude said as much ("I don't have a direct tool to fetch repo://tree") and fell back to
+`search_symbol` instead, without opening a single file. So the tree/file access Claude
+actually uses comes through two more tools, `list_tree` and `read_file`, which just wrap
+the same instrumented functions the resources use. The resources are still there for
+direct MCP clients like the inspector; the tools are what the model calls.
 
-Every file the MCP server serves is instrumented into `server/navigation_log.py` — that log
-is the foundation of the whole XAI layer (the scope panel, the audit trail, the stability
-score all read from it).
+Every file the server hands out gets logged in `server/navigation_log.py`. That log is
+what the whole XAI layer is built on: the scope panel, the audit trail, the stability
+score, all of it reads from there.
 
 ## Install
 
@@ -57,35 +58,44 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Create a `.env` (never commit it):
+Then a `.env` (don't commit it):
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional (see "one wrinkle" below)
+NGROK_AUTHTOKEN=...
+
+# Optional, if you're tired of retyping these for the same repo (CLI flags still win)
+CODEBASEQNA_REPO=/path/to/repo
+CODEBASEQNA_MODEL=claude-sonnet-5
+CODEBASEQNA_MAX_FILES=8
 ```
 
-**One deployment wrinkle worth knowing up front:** Claude's MCP connector (the
-`mcp_servers` field on the Messages API) calls your MCP server *from Anthropic's
-infrastructure*, not from your machine. `cli.py` starts `server/mcp_server.py` locally
-for you, but for a real (non-localhost-only) query you need to put a public HTTPS URL in
-front of it. The easy way — pass `--tunnel` and `cli.py` starts an ngrok tunnel for you
-automatically:
+**One wrinkle worth knowing before you run anything for real:** Claude's MCP connector
+calls your server *from Anthropic's infrastructure*, not from your machine. `cli.py`
+starts `server/mcp_server.py` locally, which is fine for local smoke-testing, but a real
+query needs that server reachable from the outside, meaning a public HTTPS URL in front
+of it. Easiest way: pass `--tunnel` and let the CLI spin up ngrok for you.
 
 ```bash
 python cli.py --repo /path/to/repo --question "where is auth handled?" --tunnel
 ```
 
-This requires ngrok to be installed and authenticated once (https://ngrok.com) — if your
-machine doesn't already have that set up, set `NGROK_AUTHTOKEN` in `.env` instead. The
-tunnel is torn down automatically when the command finishes.
+That needs ngrok installed and authenticated once (ngrok.com). If this machine hasn't
+done that yet, drop `NGROK_AUTHTOKEN` into `.env` instead. The tunnel comes down on its
+own when the command finishes, error or not.
 
-Alternatively, do it manually — run `ngrok http 8000` yourself and point the tool at it:
+Or skip the flag and do it by hand:
 
 ```bash
+ngrok http 8000
 export MCP_SERVER_URL="https://<your-ngrok-subdomain>.ngrok.io/mcp/"
 ```
 
-Without either, only local smoke-testing works (curling the server directly, or running
-the test suite, which mocks the Anthropic call and drives the real local server instead).
+Neither one? You're limited to local smoke-testing: curling the server directly, or
+running the test suite, which mocks the Anthropic call and drives the real local server
+underneath it.
 
 ## Usage
 
@@ -93,105 +103,111 @@ the test suite, which mocks the Anthropic call and drives the real local server 
 # Basic query
 python cli.py --repo /path/to/repo --question "where is auth handled?"
 
-# Structured output (for piping into other tools)
+# Structured output, for piping into other tools
 python cli.py --repo /path/to/repo --question "where is auth handled?" --output json
 
-# Faithfulness check: re-verify a previous answer's citations against the actual files,
-# using a second Claude call that reads straight off disk (not through MCP, so it can't
-# pollute the original session's navigation log)
+# Faithfulness check: a second, independent Claude call re-reads the cited files straight
+# off disk (not through MCP, so it can't pollute the original session's nav log) and scores
+# whether the earlier answer's citations actually hold up
 python cli.py --verify <session-id>
 
-# Stability check: rerun the same question N times and measure how consistent the set of
-# files Claude reads is, via pairwise Jaccard similarity. Costs ~N× a normal query.
+# Stability check: rerun the same question N times, measure how consistent the set of
+# files Claude reads is across runs. Costs roughly N× a normal query, so it asks first.
 python cli.py --repo /path/to/repo --question "where is auth handled?" --stability --runs 3
 
-# ChromaDB-assisted retrieval for large repos (>500 files): chunks the repo by function/class
-# boundary, embeds it, and prepends the top-k relevant chunks to the question before asking
+# ChromaDB-assisted retrieval: chunks the repo by function/class boundary, embeds it, and
+# prepends the most relevant chunks to the question before asking. Kicks in on its own for
+# repos over 500 files (you'll get a warning first, since embedding isn't free); pass
+# --index explicitly if you want it on a smaller repo too.
 python cli.py --repo /path/to/repo --question "where is auth handled?" --index
 
-# Interactive mode: ask several questions against one repo without restarting the MCP
-# server between them. Each question is still an independent, stateless Claude call.
+# Interactive mode: ask a few questions against one repo without restarting the MCP
+# server for each one. Still stateless per question by default.
 python cli.py --repo /path/to/repo --interactive
 
-# Interactive mode with real conversation memory: prior turns (including Claude's
-# reasoning) are carried into each new question, so follow-ups like "what about the
-# token refresh path?" build on earlier findings instead of starting from scratch.
+# Interactive mode, but with actual memory: Claude's earlier turns (reasoning included)
+# get carried into each new question, so "what about the token refresh path?" builds on
+# what it already found instead of starting cold.
 python cli.py --repo /path/to/repo --interactive --memory
 
-# Full thinking block instead of the first 400 chars
+# See the whole thinking block instead of the first 400 characters
 python cli.py --repo /path/to/repo --question "where is auth handled?" --verbose
 
-# Browse past sessions instead of asking a new question
+# Look back at past sessions instead of asking something new
 python cli.py --list-sessions
 python cli.py --show-session <session-id>
 ```
 
-Every query also prints a rough per-query cost estimate (based on a static pricing table,
-not live billing data) after the answer.
+Every query prints a rough per-query cost estimate after the answer: a ballpark from a
+static pricing table, not a real billing number.
 
-**Config defaults via `.env`:** set `CODEBASEQNA_REPO`, `CODEBASEQNA_MODEL`, or
-`CODEBASEQNA_MAX_FILES` in `.env` to stop retyping `--repo`/`--model`/`--max-files` on a
-repo you query repeatedly. CLI flags still override them.
+**Shell completion:** `eval "$(_CODEBASEQNA_COMPLETE=bash_source python cli.py)"` (swap in
+`zsh_source` for zsh).
 
-**Shell completion:** `eval "$(_CODEBASEQNA_COMPLETE=bash_source python cli.py)"` (or
-`zsh_source` for zsh) enables tab completion for flags.
+That's not the full flag list. `--model`, `--max-files`, `--port`, `--runs`, and
+`-y`/`--yes` (skips the `--stability` confirmation prompt) didn't get their own examples
+above. `python cli.py --help` has everything.
 
 ## XAI features
 
-Five principles, each independently testable, each doing one job:
+Five principles here, each one testable on its own and doing exactly one job.
 
-**1. Attribution** (`xai/attribution.py`) — every factual claim in Claude's answer must cite
-an exact `` `file.py:N-M` `` range. This module regexes those citations out of the prose and
-validates each one against the real filesystem (exists, not a path-traversal attempt, line
-range within the file's actual length), flagging anything else as `INVALID_PATH` or
-`INVALID_RANGE`. This is the project's version of *grounding*: an answer isn't just fluent,
-it's checked against the evidence it claims to rest on.
+**Attribution** (`xai/attribution.py`) is the grounding check: every factual claim in an
+answer has to cite an exact `` `file.py:N-M` `` range, and this module pulls those
+citations out of the prose with a regex and checks each one against the real filesystem:
+does the file exist, is it actually inside the repo, does the line range fit. Anything
+that doesn't check out gets flagged `INVALID_PATH` or `INVALID_RANGE` rather than quietly
+trusted.
 
-**2. Scope transparency** (the "Files read: N of M total" panel in `cli.py`) — every query
-reports exactly which files were opened, why, and what fraction of the repo that represents.
-This is the same idea as reporting a model's *evidence set* or *saliency scope* in extractive
-QA: knowing what the model looked at is often as informative as the answer itself, especially
-for catching an answer that's confidently wrong because it never read the relevant file.
+Then there's scope transparency, which is really just the "Files read: N of M total"
+line `cli.py` prints after every answer. It sounds minor, but it's often the most useful
+signal in the whole output: knowing what the model actually looked at tells you a lot
+about whether to trust the answer, especially when it's confidently wrong because it never
+opened the one file that mattered.
 
-**3. Negative results** (the not-found "Search report" panel in `cli.py`) — when Claude can't
-find something, the tool doesn't let it guess. It reports what it checked, the closest match
-it found, and suggested next steps instead of a fabricated answer. This is *selective
-prediction* / abstention: a system that knows when to say "I don't know" is more trustworthy
-than one that always answers.
+When Claude can't find something, the tool doesn't let it improvise. The not-found path
+prints what it checked, the closest match it found, and a few suggested next steps instead
+of a plausible-sounding guess. Knowing when to say "I don't know" is worth more than always
+having an answer.
 
-**4. Confidence & uncertainty typing** (`xai/confidence.py`) — Claude self-reports a
-confidence level and an uncertainty *type* (epistemic — "I don't have enough evidence" —
-vs. aleatoric — "the answer is genuinely ambiguous" — vs. both vs. none). Because models are
-bad at policing their own overconfidence, two overrides are enforced in code, not trusted
-from the model's own output: uncertainty can't be "none" if the call graph wasn't fully
-traced, and confidence can't be "high" if no files were actually read.
+Confidence gets a bit more scrutiny than just trusting whatever Claude reports.
+`xai/confidence.py` has Claude self-rate both a confidence level and an uncertainty *type*:
+epistemic ("not enough evidence yet") versus aleatoric ("this is genuinely ambiguous")
+versus both versus neither. Models aren't great at policing their own overconfidence
+though, so two checks run in code regardless of what the model claims: uncertainty can't
+be "none" if the call graph was never fully traced, and confidence can't be "high" if no
+files were actually read.
 
-**5a. Faithfulness verification** (`xai/faithfulness.py`, `--verify`) — a second, independent
-Claude call re-checks each cited claim against the real file content and scores it
-VERIFIED / PARTIAL / UNSUPPORTED. This is a *faithfulness* metric in the explainability
-sense: does the stated rationale actually match the evidence, or did the model cite a
-plausible-looking line that doesn't actually support the claim?
+`--verify` runs a fifth check after the fact: a second Claude call re-reads the cited
+files and scores each claim VERIFIED, PARTIAL, or UNSUPPORTED. It's asking a slightly
+different question than attribution does: not just "does this file:line exist" but "does
+it actually say what the answer claims it says."
 
-**5b. Stability analysis** (`xai/stability.py`, `--stability`) — see below.
+And then stability, which gets its own section below because it's the one with an actual
+research citation behind it.
 
 ## Connection to explanation-stability research
 
-`--stability` runs the same question N times and computes the pairwise Jaccard similarity
-between the sets of files Claude reports reading across runs. This is a direct methodological
-port from a well-known problem in the SHAP / feature-attribution literature (studied, among
-other places, at the ACM FAccT conference): an explanation method that gives wildly different
-"important features" on repeated runs of the same input isn't one you can trust, no matter how
-plausible any single run looks. The same logic applies here — if Claude reads a different set
-of files each time you ask the identical question, its citations are evidence of *a* reasoning
-path, not *the* reasoning path, and any individual answer's confidence should be discounted
-accordingly. Mean Jaccard ≥ 0.7 is rated "high" stability, ≥ 0.4 "moderate", below that "low".
+`--stability` asks the same question N times and computes pairwise Jaccard similarity
+across the sets of files Claude says it read each run. This is lifted pretty directly from
+a known problem in the SHAP / feature-attribution world (the ACM FAccT crowd has written
+about it too): if an explanation method points at wildly different "important features"
+every time you rerun it on the same input, you can't really trust any single run's
+explanation, however convincing it looks in isolation. Same logic here: if Claude reads a
+different set of files each time for the identical question, its citations are evidence of
+*a* path through the reasoning, not *the* path, and that should knock down how much you
+trust any one answer. Mean Jaccard ≥ 0.7 gets called "high" stability, ≥ 0.4 "moderate",
+anything below that "low."
 
 ## Demo
 
-Not included in this repo — record one against a real repo with:
+![demo](demo.gif)
+
+Recorded with [asciinema](https://asciinema.org) and converted with
+[agg](https://github.com/asciinema/agg):
 
 ```bash
-asciinema rec demo.cast
+asciinema rec --cols 120 --rows 50 demo.cast
 # ...run a few `python cli.py` queries...
 agg demo.cast demo.gif
 ```
@@ -199,6 +215,6 @@ agg demo.cast demo.gif
 ## Tests
 
 ```bash
-pytest tests/unit/         # 68 cases across every module
+pytest tests/unit/         # 100 cases across every module
 pytest tests/integration/  # 6 cases against tests/fixtures/sample_repo/, Anthropic API mocked
 ```
