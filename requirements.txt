@@ -5,4 +5,5 @@ click
 python-dotenv
 chromadb
 sentence-transformers
+pyngrok
 pytest

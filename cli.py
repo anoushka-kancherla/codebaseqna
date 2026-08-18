@@ -60,6 +60,29 @@ def _start_local_mcp_server(repo_path: Path, port: int) -> uvicorn.Server:
     return server_instance
 
 
+def _start_ngrok_tunnel(port: int) -> str:
+    from pyngrok import ngrok
+
+    authtoken = os.environ.get("NGROK_AUTHTOKEN")
+    if authtoken:
+        ngrok.set_auth_token(authtoken)
+    try:
+        tunnel = ngrok.connect(port, "http", bind_tls=True)
+    except Exception as e:
+        raise click.ClickException(
+            f"Failed to start ngrok tunnel: {e}\n"
+            "Make sure ngrok is installed and authenticated (https://ngrok.com), "
+            "or drop --tunnel and set MCP_SERVER_URL manually instead."
+        )
+    return tunnel.public_url.rstrip("/") + "/mcp/"
+
+
+def _stop_ngrok_tunnel() -> None:
+    from pyngrok import ngrok
+
+    ngrok.kill()
+
+
 def _highlight_citations(prose: str) -> str:
     return CITATION_RE.sub(lambda m: click.style(m.group(0), fg="cyan", bold=True), prose)
 
@@ -202,10 +225,12 @@ def _print_stability_report(result: dict):
 @click.option("--verbose", is_flag=True, help="Print the full thinking block instead of the first 400 chars.")
 @click.option("--list-sessions", "list_sessions", is_flag=True, help="List saved sessions from ./logs and exit.")
 @click.option("--show-session", "show_session_id", default=None, help="Print a saved session by id and exit.")
+@click.option("--tunnel", "use_tunnel", is_flag=True, help="Auto-start an ngrok tunnel so Anthropic's MCP connector can reach the local server, instead of setting MCP_SERVER_URL manually.")
 def main(
     repo: str | None, question: str | None, model: str, max_files: int, port: int, output: str,
     verify_session_id: str | None, stability: bool, runs: int, use_index: bool, yes: bool,
     interactive: bool, verbose: bool, list_sessions: bool, show_session_id: str | None,
+    use_tunnel: bool,
 ):
     if list_sessions:
         logs_dir = session_module.LOGS_DIR
@@ -243,7 +268,12 @@ def main(
     repo_path = Path(repo).resolve()
     total_files = mcp_server._count_files(mcp_server._build_tree(repo_path))
     _start_local_mcp_server(repo_path, port)
-    mcp_server_url = os.environ.get("MCP_SERVER_URL", f"http://127.0.0.1:{port}/mcp/")
+
+    if use_tunnel:
+        mcp_server_url = _start_ngrok_tunnel(port)
+        click.secho(f"ngrok tunnel: {mcp_server_url}", fg="yellow")
+    else:
+        mcp_server_url = os.environ.get("MCP_SERVER_URL", f"http://127.0.0.1:{port}/mcp/")
 
     from retrieval.chroma_index import LARGE_REPO_THRESHOLD
     if not use_index and total_files > LARGE_REPO_THRESHOLD:
@@ -256,40 +286,44 @@ def main(
     if use_index:
         _build_chroma_index(repo_path)
 
-    if stability:
-        from xai.stability import run_stability_check
+    try:
+        if stability:
+            from xai.stability import run_stability_check
+
+            context_prefix = _query_chroma_context(question) if use_index else None
+            click.secho(f"This runs the question {runs} times (~{runs}x normal API cost).", fg="yellow")
+            if not yes and not click.confirm("Proceed?", default=True):
+                click.echo("Aborted.")
+                return
+            result = run_stability_check(
+                question, str(repo_path), runs=runs, model=model, max_files=max_files,
+                mcp_server_url=mcp_server_url, context_prefix=context_prefix,
+            )
+            if output == "json":
+                click.echo(json.dumps(result, indent=2))
+            else:
+                _print_stability_report(result)
+            return
+
+        if interactive:
+            while True:
+                try:
+                    q = input("\n> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    click.echo("\nGoodbye.")
+                    break
+                if q in ("", "exit", "quit"):
+                    break
+                mcp_server.NAV_LOG = NavigationLog()
+                context_prefix = _query_chroma_context(q) if use_index else None
+                _answer_question(q, repo_path, model, max_files, mcp_server_url, context_prefix, output, total_files, verbose)
+            return
 
         context_prefix = _query_chroma_context(question) if use_index else None
-        click.secho(f"This runs the question {runs} times (~{runs}x normal API cost).", fg="yellow")
-        if not yes and not click.confirm("Proceed?", default=True):
-            click.echo("Aborted.")
-            return
-        result = run_stability_check(
-            question, str(repo_path), runs=runs, model=model, max_files=max_files,
-            mcp_server_url=mcp_server_url, context_prefix=context_prefix,
-        )
-        if output == "json":
-            click.echo(json.dumps(result, indent=2))
-        else:
-            _print_stability_report(result)
-        return
-
-    if interactive:
-        while True:
-            try:
-                q = input("\n> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                click.echo("\nGoodbye.")
-                break
-            if q in ("", "exit", "quit"):
-                break
-            mcp_server.NAV_LOG = NavigationLog()
-            context_prefix = _query_chroma_context(q) if use_index else None
-            _answer_question(q, repo_path, model, max_files, mcp_server_url, context_prefix, output, total_files, verbose)
-        return
-
-    context_prefix = _query_chroma_context(question) if use_index else None
-    _answer_question(question, repo_path, model, max_files, mcp_server_url, context_prefix, output, total_files, verbose)
+        _answer_question(question, repo_path, model, max_files, mcp_server_url, context_prefix, output, total_files, verbose)
+    finally:
+        if use_tunnel:
+            _stop_ngrok_tunnel()
 
 
 if __name__ == "__main__":

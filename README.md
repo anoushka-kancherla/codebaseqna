@@ -67,14 +67,25 @@ ANTHROPIC_API_KEY=sk-ant-...
 `mcp_servers` field on the Messages API) calls your MCP server *from Anthropic's
 infrastructure*, not from your machine. `cli.py` starts `server/mcp_server.py` locally
 for you, but for a real (non-localhost-only) query you need to put a public HTTPS URL in
-front of it — e.g. `ngrok http 8000` — and point the tool at it:
+front of it. The easy way — pass `--tunnel` and `cli.py` starts an ngrok tunnel for you
+automatically:
+
+```bash
+python cli.py --repo /path/to/repo --question "where is auth handled?" --tunnel
+```
+
+This requires ngrok to be installed and authenticated once (https://ngrok.com) — if your
+machine doesn't already have that set up, set `NGROK_AUTHTOKEN` in `.env` instead. The
+tunnel is torn down automatically when the command finishes.
+
+Alternatively, do it manually — run `ngrok http 8000` yourself and point the tool at it:
 
 ```bash
 export MCP_SERVER_URL="https://<your-ngrok-subdomain>.ngrok.io/mcp/"
 ```
 
-Without that, only local smoke-testing works (curling the server directly, or running the
-test suite, which mocks the Anthropic call and drives the real local server instead).
+Without either, only local smoke-testing works (curling the server directly, or running
+the test suite, which mocks the Anthropic call and drives the real local server instead).
 
 ## Usage
 

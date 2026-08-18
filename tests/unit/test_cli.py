@@ -376,3 +376,76 @@ def test_cli_small_repo_does_not_auto_activate_index(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "auto-enabling --index" not in result.output
     assert captured["context_prefix"] is None
+
+
+def test_cli_tunnel_flag_uses_ngrok_url(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    calls = {"start_port": None, "stop_count": 0}
+
+    def fake_start_tunnel(port):
+        calls["start_port"] = port
+        return "https://fake.ngrok.io/mcp/"
+
+    def fake_stop_tunnel():
+        calls["stop_count"] += 1
+
+    captured = {}
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        captured["mcp_server_url"] = mcp_server_url
+        return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
+
+    monkeypatch.setattr(cli, "_start_ngrok_tunnel", fake_start_tunnel)
+    monkeypatch.setattr(cli, "_stop_ngrok_tunnel", fake_stop_tunnel)
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "q?", "--tunnel", "--port", "8015"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["start_port"] == 8015
+    assert captured["mcp_server_url"] == "https://fake.ngrok.io/mcp/"
+    assert "ngrok tunnel: https://fake.ngrok.io/mcp/" in result.output
+    assert calls["stop_count"] == 1
+
+
+def test_cli_tunnel_stopped_even_when_query_raises(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    calls = {"stop_count": 0}
+    monkeypatch.setattr(cli, "_start_ngrok_tunnel", lambda port: "https://fake.ngrok.io/mcp/")
+    monkeypatch.setattr(cli, "_stop_ngrok_tunnel", lambda: calls.__setitem__("stop_count", calls["stop_count"] + 1))
+
+    def raising_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "run_query", raising_run_query)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "q?", "--tunnel", "--port", "8016"])
+
+    assert result.exit_code != 0
+    assert calls["stop_count"] == 1
+
+
+def test_cli_without_tunnel_flag_ngrok_never_touched(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("ngrok should not be touched without --tunnel")
+
+    monkeypatch.setattr(cli, "_start_ngrok_tunnel", fail_if_called)
+    monkeypatch.setattr(cli, "_stop_ngrok_tunnel", fail_if_called)
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        return ParsedResponse(thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "q?", "--port", "8017"])
+
+    assert result.exit_code == 0, result.output

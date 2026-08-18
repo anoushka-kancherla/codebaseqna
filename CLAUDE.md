@@ -668,6 +668,30 @@ for the actual `cli.py` snippet — reuses `LARGE_REPO_THRESHOLD` from
 `click.secho` before auto-enabling since the embedding pass has a real cost the user
 didn't explicitly ask for.
 
+### `--tunnel`
+
+Automates the "deployment wrinkle" documented in the README: Claude's MCP connector
+calls the local server from Anthropic's infrastructure, so any real query needs a public
+HTTPS URL in front of it, previously a fully manual `ngrok http 8000` +
+`export MCP_SERVER_URL=...` step.
+
+- `_start_ngrok_tunnel(port)` / `_stop_ngrok_tunnel()` in `cli.py` wrap `pyngrok`, lazily
+  imported (same pattern as the `chromadb` lazy imports) so invocations without
+  `--tunnel` pay zero cost. `ngrok.connect(port, "http", bind_tls=True)` forces an
+  HTTPS-only tunnel — a plain `http://` URL would fail the same way localhost does.
+- **Precedence:** `--tunnel` always wins over a stale `MCP_SERVER_URL` env var when
+  passed; without `--tunnel`, behavior is byte-for-byte unchanged (the env var still
+  falls back to `http://127.0.0.1:{port}/mcp/`).
+- **Critical:** the tunnel must be torn down even on error, or ngrok's agent process
+  leaks past the CLI invocation and can hit ngrok's concurrent-tunnel limit on the next
+  run. `main()`'s stability/interactive/single-question logic is wrapped in a
+  `try`/`finally` that calls `_stop_ngrok_tunnel()` unconditionally when `--tunnel` was
+  used — this covers every `return` path and any exception, not just the happy path.
+- Optional `NGROK_AUTHTOKEN` env var (read via the existing `.env`/`load_dotenv()`
+  mechanism) for machines without ngrok already configured; on a machine with ngrok
+  pre-authenticated, `--tunnel` needs no extra setup.
+- New dependency: `pyngrok` (added to `requirements.txt`).
+
 ---
 
 ## Session log schema
@@ -757,7 +781,7 @@ LARGE_REPO_THRESHOLD = 500   # files — activate ChromaDB above this
 
 ```bash
 # Install
-pip install anthropic mcp gitpython click python-dotenv chromadb sentence-transformers pytest
+pip install anthropic mcp gitpython click python-dotenv chromadb sentence-transformers pyngrok pytest
 
 # .env
 ANTHROPIC_API_KEY=sk-ant-...
@@ -772,6 +796,7 @@ python cli.py --repo /path/to/repo --interactive
 python cli.py --repo /path/to/repo --question "..." --verbose
 python cli.py --list-sessions
 python cli.py --show-session <session-id>
+python cli.py --repo /path/to/repo --question "..." --tunnel
 
 # Test
 pytest tests/unit/
