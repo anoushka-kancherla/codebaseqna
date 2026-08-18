@@ -1,3 +1,4 @@
+import importlib
 import json
 
 from click.testing import CliRunner
@@ -209,3 +210,129 @@ def test_cli_index_flag_prepends_context(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["context_prefix"] is not None
     assert "login" in captured["context_prefix"]
+
+
+def test_cli_verbose_shows_full_thinking(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+    long_thinking = "x" * 500
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        return ParsedResponse(thinking=long_thinking, json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "q?", "--verbose", "--port", "8010"])
+
+    assert result.exit_code == 0, result.output
+    assert long_thinking in result.output
+    assert "[--verbose to expand]" not in result.output
+
+
+def test_cli_without_verbose_truncates_thinking(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+    long_thinking = "x" * 500
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        return ParsedResponse(thinking=long_thinking, json_header={"confidence": "low"}, prose="answer", tool_results=[], usage={})
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "q?", "--port", "8011"])
+
+    assert result.exit_code == 0, result.output
+    assert long_thinking not in result.output
+    assert "[--verbose to expand]" in result.output
+
+
+def test_cli_prints_estimated_cost(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("hello\n")
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+
+    def fake_run_query(repo_path, question, model, max_files, mcp_server_url, context_prefix=None):
+        return ParsedResponse(
+            thinking="", json_header={"confidence": "low"}, prose="answer", tool_results=[],
+            usage={"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+        )
+
+    monkeypatch.setattr(cli, "run_query", fake_run_query)
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--repo", str(tmp_path), "--question", "q?", "--port", "8012"])
+
+    assert result.exit_code == 0, result.output
+    # default sonnet pricing: $3/M input + $15/M output = $18.00 for 1M+1M tokens
+    assert "Estimated cost: $18.0000" in result.output
+
+
+def test_cli_list_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+    (tmp_path / "abc.json").write_text(json.dumps({
+        "session_id": "abc", "created_at": "2026-01-01T00:00:00Z", "question": "where is auth?",
+    }))
+
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--list-sessions"])
+
+    assert result.exit_code == 0, result.output
+    assert "abc" in result.output
+    assert "where is auth?" in result.output
+
+
+def test_cli_list_sessions_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path / "nonexistent")
+
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--list-sessions"])
+
+    assert result.exit_code == 0, result.output
+    assert "No sessions found." in result.output
+
+
+def test_cli_show_session(tmp_path, monkeypatch):
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+    session_data = {
+        "session_id": "abc123",
+        "repo_path": "/some/repo",
+        "question": "where is auth?",
+        "created_at": "2026-01-01T00:00:00Z",
+        "answer": {"prose": "Auth lives in `auth.py:1-2`.", "not_found": None},
+        "confidence": {"level": "high", "uncertainty_type": "none"},
+        "navigation": {
+            "files_read": 1, "total_files_in_repo": 5, "coverage_pct": 20.0,
+            "reads": [{"event": "file_read", "path": "auth.py"}],
+        },
+    }
+    (tmp_path / "abc123.json").write_text(json.dumps(session_data))
+
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--show-session", "abc123"])
+
+    assert result.exit_code == 0, result.output
+    assert "auth.py:1-2" in result.output
+    assert "HIGH" in result.output
+    assert "auth.py" in result.output
+
+
+def test_cli_show_session_missing_id_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr("qa_types.session.LOGS_DIR", tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli.main, ["--show-session", "nonexistent"])
+    assert result.exit_code != 0
+    assert "No session found" in result.output
+
+
+def test_cli_env_defaults_applied(monkeypatch):
+    monkeypatch.setenv("CODEBASEQNA_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("CODEBASEQNA_MAX_FILES", "5")
+    monkeypatch.setenv("CODEBASEQNA_REPO", "/tmp/some-repo")
+    importlib.reload(cli)
+    try:
+        assert cli.DEFAULT_MODEL_ENV == "claude-haiku-4-5"
+        assert cli.DEFAULT_MAX_FILES_ENV == 5
+        assert cli.DEFAULT_REPO_ENV == "/tmp/some-repo"
+    finally:
+        monkeypatch.delenv("CODEBASEQNA_MODEL", raising=False)
+        monkeypatch.delenv("CODEBASEQNA_MAX_FILES", raising=False)
+        monkeypatch.delenv("CODEBASEQNA_REPO", raising=False)
+        importlib.reload(cli)
