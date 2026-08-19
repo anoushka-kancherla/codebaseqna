@@ -1,4 +1,4 @@
-# codebaseqna
+# Codebase Q&A
 
 A CLI tool that answers plain-English questions about a local codebase (“where’s auth
 handled?”, “what changed in the last commit that broke this?”) by handing Claude scoped,
